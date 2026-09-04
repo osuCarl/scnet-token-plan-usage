@@ -39,6 +39,9 @@ const STRINGS = {
     noPlan: 'Set your plan quota in settings to see remaining Credits',
     byModel: 'By model',
     trend: 'Daily credits',
+    legendInput: 'Input',
+    legendCached: 'Cached',
+    legendOutput: 'Output',
     multiplier: m => `×${m}`,
     multiplierUnknown: '×?',
     tokens: (i, o, c) => `in ${fmt(i)} · out ${fmt(o)} · cache ${fmt(c)}`,
@@ -70,6 +73,9 @@ const STRINGS = {
     noPlan: '在设置中填写套餐额度后可查看剩余 Credits',
     byModel: '按模型',
     trend: '每日消耗',
+    legendInput: '输入',
+    legendCached: '缓存',
+    legendOutput: '输出',
     multiplier: m => `×${m}`,
     multiplierUnknown: '×?',
     tokens: (i, o, c) => `输入 ${fmt(i)} · 输出 ${fmt(o)} · 缓存 ${fmt(c)}`,
@@ -102,6 +108,35 @@ function fmtCredits(n) {
   return n.toLocaleString(undefined, { maximumFractionDigits: 0 })
 }
 
+// Chart helpers ---------------------------------------------------------------
+
+// Short axis tick for a credit amount: 12000 → "12k", 1500000 → "1.5M"
+function fmtAxis(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(n % 1e6 === 0 ? 0 : 1) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(n % 1e3 === 0 ? 0 : 1) + 'k'
+  return String(n)
+}
+
+// X-axis label for a YYYY-MM-DD day: "8/6" style, like the reference chart
+function fmtDay(day) {
+  const [, m, d] = day.split('-')
+  return `${Number(m)}/${Number(d)}`
+}
+
+// Nice y-axis ticks for [0, max]: 1/2/5 × 10^k steps, max 4 ticks
+function axisTicks(max) {
+  if (max <= 0) return []
+  const raw = max / 3
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)))
+  let step = pow
+  for (const m of [1, 2, 5, 10]) {
+    if (m * pow >= raw) { step = m * pow; break }
+  }
+  const ticks = []
+  for (let v = step; v <= max; v += step) ticks.push(v)
+  return ticks
+}
+
 // ---------------------------------------------------------------------------
 // Backend access (ctx.rest captured at register time)
 // ---------------------------------------------------------------------------
@@ -117,7 +152,7 @@ const USAGE_KEY = ['scnet-usage', 'usage']
 function useUsage() {
   return useQuery({
     queryKey: USAGE_KEY,
-    queryFn: () => api('/usage?days=30'),
+    queryFn: () => api('/usage'),
     refetchInterval: 30_000,
     staleTime: 10_000,
   })
@@ -276,6 +311,110 @@ function ProgressBar({ percent, danger, warn }) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// Daily stacked bar chart (current cycle)
+// ---------------------------------------------------------------------------
+
+// Stacked-bucket colors: input = deep blue, cached = light blue, output =
+// warm amber — picked to echo the reference image's two-blue stack while
+// staying readable on both light and dark themes.
+const BUCKET_COLORS = {
+  input: 'bg-(--ui-accent)',
+  cached: 'bg-sky-400/70',
+  output: 'bg-amber-400/80',
+}
+
+function DailyChart({ daily, cycleDays, t }) {
+  // Normalize rows so a stale/older backend payload (missing new fields)
+  // can never crash the chart — every field gets a default here.
+  const rows = daily.map(d => ({
+    day: d.day,
+    credits: d.credits || 0,
+    input_cr: d.input_cr || 0,
+    cached_cr: d.cached_cr || 0,
+    output_cr: d.output_cr || 0,
+    input: d.input || 0, output: d.output || 0, cached: d.cached || 0,
+    calls: d.calls || 0,
+  }))
+  // zero-fill every day of the cycle so bars keep their date position
+  const byDay = new Map(rows.map(d => [d.day, d]))
+  const days = (cycleDays && cycleDays.length ? cycleDays : rows.map(d => d.day))
+  const today = new Date().toISOString().slice(0, 10)
+  const maxCredits = Math.max(1, ...rows.map(d => d.credits))
+  const ticks = axisTicks(maxCredits)
+
+  // label every ~nth bar so the x axis stays readable (target ≤ 6 labels)
+  const labelEvery = Math.max(1, Math.ceil(days.length / 6))
+
+  return jsxs('div', { className: 'flex flex-col gap-2', children: [
+    // legend
+    jsxs('div', { className: 'flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.6875rem] text-(--ui-text-quaternary)', children: [
+      ...['input', 'cached', 'output'].map(k => jsxs('span', { className: 'inline-flex items-center gap-1', children: [
+        jsx('span', { className: cn('inline-block h-2 w-2 rounded-[2px]', BUCKET_COLORS[k]) }),
+        t(k === 'input' ? 'legendInput' : k === 'cached' ? 'legendCached' : 'legendOutput'),
+      ] }, k)),
+    ] }),
+
+    // plot area: y-axis labels + bar field
+    jsxs('div', { className: 'flex gap-1.5', children: [
+      // y axis
+      jsxs('div', {
+        className: 'flex h-28 shrink-0 flex-col justify-between py-[1px] text-right text-[0.625rem] leading-none text-(--ui-text-quaternary) tabular-nums',
+        children: ticks.slice().reverse().map(v => jsx('span', { children: fmtAxis(v) }, v)),
+      }),
+      // bars + gridlines (one container so gridlines align with bar tops)
+      jsxs('div', { className: 'relative h-28 flex-1', children: [
+        ...ticks.map(v => jsx('div', {
+          className: 'pointer-events-none absolute inset-x-0 border-t border-(--ui-stroke-secondary)/60',
+          style: { top: `${100 - (v / maxCredits) * 100}%` },
+        }, `grid-${v}`)),
+        jsxs('div', { className: 'absolute inset-0 flex items-end gap-[2px]', children:
+          days.map(day => {
+            const d = byDay.get(day) || { day, credits: 0, input_cr: 0, cached_cr: 0, output_cr: 0, calls: 0, input: 0, output: 0, cached: 0 }
+            const isToday = day === today
+            const tipLines = [
+              day,
+              `${fmtCredits(d.credits)} cr`,
+              `${t('legendInput')} ${fmtCredits(d.input_cr)} · ${t('legendCached')} ${fmtCredits(d.cached_cr)} · ${t('legendOutput')} ${fmtCredits(d.output_cr)}`,
+              t('calls', d.calls),
+            ]
+            return jsx(Tip, {
+              label: tipLines.join('\n'),
+              children: jsx('div', {
+                className: cn('group relative flex h-full min-w-[2px] flex-1 cursor-default flex-col justify-end',
+                  isToday ? 'rounded-t-[2px] ring-1 ring-inset ring-(--ui-accent)/60' : ''),
+                children: [
+                  d.credits <= 0 ? jsx('div', { className: 'h-[2px] w-full rounded-sm bg-(--ui-stroke-secondary)' }) : null,
+                  d.credits > 0 ? jsxs('div', {
+                    className: 'flex w-full flex-col-reverse overflow-hidden rounded-[2px]',
+                    style: { height: `${Math.max(3, (d.credits / maxCredits) * 100)}%` },
+                    children: [
+                      jsx('div', { className: cn('w-full', BUCKET_COLORS.input), style: { height: `${(d.input_cr / d.credits) * 100}%` } }),
+                      d.cached_cr > 0 ? jsx('div', { className: cn('w-full', BUCKET_COLORS.cached), style: { height: `${(d.cached_cr / d.credits) * 100}%` } }) : null,
+                      d.output_cr > 0 ? jsx('div', { className: cn('w-full', BUCKET_COLORS.output), style: { height: `${(d.output_cr / d.credits) * 100}%` } }) : null,
+                    ],
+                  }) : null,
+                ],
+              }),
+            }, day)
+          }),
+        }),
+      ] }),
+    ] }),
+
+    // x axis
+    jsx('div', { className: 'flex gap-1.5', children: [
+      jsx('div', { className: 'w-8 shrink-0' }),
+      jsxs('div', { className: 'flex flex-1 gap-[2px]', children:
+        days.map((day, i) => jsx('div', {
+          className: 'min-w-[2px] flex-1 text-center text-[0.625rem] leading-none text-(--ui-text-quaternary) tabular-nums',
+          children: i % labelEvery === 0 || i === days.length - 1 ? fmtDay(day) : '',
+        }, day)),
+      }),
+    ] }),
+  ] })
+}
+
 function UsagePane() {
   const t = usePluginI18n(ID)
   const { data, error, isLoading, refetch, isFetching } = useUsage()
@@ -300,7 +439,6 @@ function UsagePane() {
   const percent = plan?.percent_used
   const danger = percent != null && percent > 90
   const warn = percent != null && !danger && percent > 75
-  const maxDaily = Math.max(1, ...daily.map(d => d.credits))
 
   const openSettings = async () => {
     try { setConfig(await api('/config')) } catch { setConfig({}) }
@@ -364,20 +502,12 @@ function UsagePane() {
         ],
       }),
 
-      // daily trend
-      daily.length > 0 ? jsxs('div', {
+      // daily trend (stacked by token bucket, current cycle)
+      daily.length > 0 || data.cycle_days?.length ? jsxs('div', {
         className: 'flex flex-col gap-2 rounded-lg border border-(--ui-stroke-secondary) p-3',
         children: [
           jsx('span', { className: 'text-xs font-medium text-(--ui-text-secondary)', children: t('trend') }),
-          jsx('div', { className: 'flex h-16 items-end gap-[3px]', children:
-            daily.map(d => jsx(Tip, {
-              label: `${d.day} · ${d.credits.toLocaleString()} cr`,
-              children: jsx('div', {
-                className: 'min-w-[3px] flex-1 cursor-default rounded-sm bg-(--ui-accent) opacity-70 transition-opacity hover:opacity-100',
-                style: { height: `${Math.max(4, (d.credits / maxDaily) * 100)}%` },
-              }),
-            }, d.day))
-          }),
+          jsx(DailyChart, { daily, cycleDays: data.cycle_days, t }),
         ],
       }) : null,
 

@@ -42,12 +42,11 @@ import asyncio
 import json
 import logging
 import sqlite3
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 
 log = logging.getLogger(__name__)
 
@@ -224,10 +223,13 @@ def _cycle_bounds(cycle_start_day: int) -> tuple[float, float, str, str]:
 
 
 @router.get("/usage")
-async def get_usage(
-    days: int = Query(30, ge=1, le=365),
-) -> Dict[str, Any]:
-    """Aggregate SCNet usage + estimated Credits for the current cycle."""
+async def get_usage() -> Dict[str, Any]:
+    """Aggregate SCNet usage + estimated Credits for the current cycle.
+
+    All series (totals, per-model, daily) cover the CURRENT subscription
+    cycle only — derived from cycle_start_day in the plugin config — so the
+    daily chart matches the billed period shown in the header.
+    """
 
     def _run() -> Dict[str, Any]:
         cfg = _effective_config()
@@ -277,8 +279,10 @@ async def get_usage(
                 total["calls"] += r["api_calls"] or 0
             models = sorted(by_model.values(), key=lambda x: -x["credits"])
 
-            # ---- daily series (credits/day over the requested window) --
-            cutoff = time.time() - days * 86400
+            # ---- daily series (credits + token buckets per day of the
+            # CURRENT cycle; a cycle row's usage is attributed to the day
+            # its aggregate was last touched, matching the cycle filter
+            # above — no double counting, no leakage across cycles) ----
             daily_rows = list(
                 conn.execute(
                     """
@@ -286,25 +290,54 @@ async def get_usage(
                            model,
                            SUM(input_tokens)      AS input_tokens,
                            SUM(output_tokens)     AS output_tokens,
-                           SUM(cache_read_tokens) AS cache_read_tokens
+                           SUM(cache_read_tokens) AS cache_read_tokens,
+                           SUM(api_call_count)    AS api_calls
                     FROM session_model_usage
                     WHERE (billing_base_url LIKE ? OR billing_base_url LIKE ?)
-                      AND last_seen >= ?
+                      AND last_seen >= ? AND last_seen < ?
                     GROUP BY day, model
                     """,
-                    (f"%{SCNET_BASE_URL}%", "%api.scnet.cn%", cutoff),
+                    (f"%{SCNET_BASE_URL}%", "%api.scnet.cn%", start_ts, end_ts),
                 )
             )
-            daily: Dict[str, float] = {}
+            daily_agg: Dict[str, Dict[str, Any]] = {}
             for r in daily_rows:
                 day = r["day"]
-                c = _credits(r["model"] or "unknown", r["input_tokens"] or 0,
-                             r["cache_read_tokens"] or 0, r["output_tokens"] or 0, cfg)
-                daily[day] = daily.get(day, 0.0) + c
-            series = [{"day": d, "credits": round(v, 2)} for d, v in sorted(daily.items())]
+                entry = daily_agg.setdefault(
+                    day, {"credits": 0.0, "input_cr": 0.0, "cached_cr": 0.0,
+                          "output_cr": 0.0, "input": 0, "output": 0, "cached": 0, "calls": 0}
+                )
+                model = r["model"] or "unknown"
+                mult = cfg["multipliers"].get(model, cfg["unknown_multiplier"])
+                i_t, c_t, o_t = (r["input_tokens"] or 0), (r["cache_read_tokens"] or 0), (r["output_tokens"] or 0)
+                c = _credits(model, i_t, c_t, o_t, cfg)
+                entry["credits"] += c
+                entry["input_cr"] += i_t / INPUT_TPC * mult
+                entry["cached_cr"] += c_t / CACHED_TPC * mult
+                entry["output_cr"] += o_t / OUTPUT_TPC * mult
+                entry["input"] += i_t
+                entry["output"] += o_t
+                entry["cached"] += c_t
+                entry["calls"] += r["api_calls"] or 0
+            series = [
+                {"day": d, "credits": round(v["credits"], 2),
+                 "input_cr": round(v["input_cr"], 2),
+                 "cached_cr": round(v["cached_cr"], 2),
+                 "output_cr": round(v["output_cr"], 2),
+                 "input": v["input"], "output": v["output"],
+                 "cached": v["cached"], "calls": v["calls"]}
+                for d, v in sorted(daily_agg.items())
+            ]
 
             today = datetime.now().strftime("%Y-%m-%d")
-            today_credits = round(daily.get(today, 0.0), 2)
+            today_credits = round(daily_agg.get(today, {}).get("credits", 0.0), 2)
+
+            # ---- full-day coverage of the cycle (zero-fill gap days) ----
+            ndays = int((end_ts - start_ts) // 86400)
+            cycle_days = [
+                datetime.fromtimestamp(start_ts + i * 86400).strftime("%Y-%m-%d")
+                for i in range(ndays)
+            ]
 
             # ---- lifetime totals (all time) -----------------------------
             life = conn.execute(
@@ -345,6 +378,7 @@ async def get_usage(
                     {**m, "credits": round(m["credits"], 2)} for m in models
                 ],
                 "daily": series,
+                "cycle_days": cycle_days,
                 "lifetime": {
                     "input_tokens": life["i"], "output_tokens": life["o"],
                     "cached_tokens": life["c"], "api_calls": life["n"],
