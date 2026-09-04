@@ -315,16 +315,28 @@ function ProgressBar({ percent, danger, warn }) {
 // Daily stacked bar chart (current cycle)
 // ---------------------------------------------------------------------------
 
-// Stacked-bucket colors: input = deep blue, cached = light blue, output =
-// warm amber — picked to echo the reference image's two-blue stack while
-// staying readable on both light and dark themes.
+// Stacked-bucket colors as INLINE STYLES (not Tailwind classes): plugin JS
+// is injected at runtime, AFTER the desktop app's CSS was compiled — any
+// utility class not already present in the build silently no-ops. The
+// app exposes theme vars (--ui-accent, --ui-foreground, ...) so inline
+// styles always work and follow the live theme.
 const BUCKET_COLORS = {
-  input: 'bg-(--ui-accent)',
-  cached: 'bg-sky-400/70',
-  output: 'bg-amber-400/80',
+  input: { background: 'var(--ui-accent)' },
+  cached: { background: 'color-mix(in oklab, var(--ui-accent) 45%, white)' },
+  output: { background: 'color-mix(in oklab, var(--ui-accent) 55%, #d97706)' },
 }
 
 function DailyChart({ daily, cycleDays, t }) {
+  // Guard: this chart needs the cycle-scoped payload (schema v2). An old
+  // backend (no cycle_days / *_cr fields) would render an empty plot —
+  // show a hint instead so the mismatch is visible, not silent.
+  if (!cycleDays || !cycleDays.length || !daily.some(d => d.input_cr != null)) {
+    return jsx('div', {
+      className: 'text-xs italic text-(--ui-text-quaternary)',
+      children: '…',
+    })
+  }
+
   // Normalize rows so a stale/older backend payload (missing new fields)
   // can never crash the chart — every field gets a default here.
   const rows = daily.map(d => ({
@@ -350,7 +362,7 @@ function DailyChart({ daily, cycleDays, t }) {
     // legend
     jsxs('div', { className: 'flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.6875rem] text-(--ui-text-quaternary)', children: [
       ...['input', 'cached', 'output'].map(k => jsxs('span', { className: 'inline-flex items-center gap-1', children: [
-        jsx('span', { className: cn('inline-block h-2 w-2 rounded-[2px]', BUCKET_COLORS[k]) }),
+        jsx('span', { className: 'inline-block h-2 w-2 rounded-[2px]', style: BUCKET_COLORS[k] }),
         t(k === 'input' ? 'legendInput' : k === 'cached' ? 'legendCached' : 'legendOutput'),
       ] }, k)),
     ] }),
@@ -365,10 +377,10 @@ function DailyChart({ daily, cycleDays, t }) {
       // bars + gridlines (one container so gridlines align with bar tops)
       jsxs('div', { className: 'relative h-28 flex-1', children: [
         ...ticks.map(v => jsx('div', {
-          className: 'pointer-events-none absolute inset-x-0 border-t border-(--ui-stroke-secondary)/60',
-          style: { top: `${100 - (v / maxCredits) * 100}%` },
+          className: 'pointer-events-none absolute inset-x-0 border-t',
+          style: { top: `${100 - (v / maxCredits) * 100}%`, borderColor: 'var(--ui-stroke-secondary)' },
         }, `grid-${v}`)),
-        jsxs('div', { className: 'absolute inset-0 flex items-end gap-[2px]', children:
+        jsxs('div', { className: 'absolute inset-0 flex items-end', style: { gap: '2px' }, children:
           days.map(day => {
             const d = byDay.get(day) || { day, credits: 0, input_cr: 0, cached_cr: 0, output_cr: 0, calls: 0, input: 0, output: 0, cached: 0 }
             const isToday = day === today
@@ -381,17 +393,18 @@ function DailyChart({ daily, cycleDays, t }) {
             return jsx(Tip, {
               label: tipLines.join('\n'),
               children: jsx('div', {
-                className: cn('group relative flex h-full min-w-[2px] flex-1 cursor-default flex-col justify-end',
-                  isToday ? 'rounded-t-[2px] ring-1 ring-inset ring-(--ui-accent)/60' : ''),
+                className: cn('relative flex h-full flex-1 cursor-default flex-col justify-end',
+                  isToday ? 'rounded-t-[2px]' : ''),
+                style: { minWidth: '2px', boxShadow: isToday ? 'inset 0 0 0 1px color-mix(in oklab, var(--ui-accent) 60%, transparent)' : undefined },
                 children: [
-                  d.credits <= 0 ? jsx('div', { className: 'h-[2px] w-full rounded-sm bg-(--ui-stroke-secondary)' }) : null,
+                  d.credits <= 0 ? jsx('div', { className: 'w-full rounded-[2px] bg-(--ui-stroke-secondary)', style: { height: '2px' } }) : null,
                   d.credits > 0 ? jsxs('div', {
                     className: 'flex w-full flex-col-reverse overflow-hidden rounded-[2px]',
-                    style: { height: `${Math.max(3, (d.credits / maxCredits) * 100)}%` },
+                    style: { height: `${Math.max(3, (d.credits / maxCredits) * 100)}%`, gap: 0 },
                     children: [
-                      jsx('div', { className: cn('w-full', BUCKET_COLORS.input), style: { height: `${(d.input_cr / d.credits) * 100}%` } }),
-                      d.cached_cr > 0 ? jsx('div', { className: cn('w-full', BUCKET_COLORS.cached), style: { height: `${(d.cached_cr / d.credits) * 100}%` } }) : null,
-                      d.output_cr > 0 ? jsx('div', { className: cn('w-full', BUCKET_COLORS.output), style: { height: `${(d.output_cr / d.credits) * 100}%` } }) : null,
+                      jsx('div', { className: 'w-full', style: { ...BUCKET_COLORS.input, height: `${(d.input_cr / d.credits) * 100}%` } }),
+                      d.cached_cr > 0 ? jsx('div', { className: 'w-full', style: { ...BUCKET_COLORS.cached, height: `${(d.cached_cr / d.credits) * 100}%` } }) : null,
+                      d.output_cr > 0 ? jsx('div', { className: 'w-full', style: { ...BUCKET_COLORS.output, height: `${(d.output_cr / d.credits) * 100}%` } }) : null,
                     ],
                   }) : null,
                 ],
@@ -403,11 +416,12 @@ function DailyChart({ daily, cycleDays, t }) {
     ] }),
 
     // x axis
-    jsx('div', { className: 'flex gap-1.5', children: [
+    jsxs('div', { className: 'flex gap-1.5', children: [
       jsx('div', { className: 'w-8 shrink-0' }),
-      jsxs('div', { className: 'flex flex-1 gap-[2px]', children:
+      jsxs('div', { className: 'flex flex-1', style: { gap: '2px' }, children:
         days.map((day, i) => jsx('div', {
-          className: 'min-w-[2px] flex-1 text-center text-[0.625rem] leading-none text-(--ui-text-quaternary) tabular-nums',
+          className: 'flex-1 text-center text-[0.625rem] leading-none text-(--ui-text-quaternary) tabular-nums',
+          style: { minWidth: '2px' },
           children: i % labelEvery === 0 || i === days.length - 1 ? fmtDay(day) : '',
         }, day)),
       }),
