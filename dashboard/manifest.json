@@ -1,0 +1,11 @@
+{
+  "name": "scnet-usage",
+  "label": "SCNet 用量",
+  "description": "实时监控 scnet.cn Token Plan 的 Credits 消耗：本月已用/剩余、各模型明细、按日趋势、今日消耗——数据来自本地 state.db 的逐调用记录，按官方倍率折算。",
+  "icon": "Gauge",
+  "version": "1.0.0",
+  "tab": {
+    "hidden": true
+  },
+  "api": "plugin_api.py"
+}

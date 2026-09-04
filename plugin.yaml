@@ -1,0 +1,4 @@
+name: scnet-usage
+version: 1.0.0
+description: "Monitor scnet.cn Token Plan Credits usage in real time. Meters locally from Hermes' state.db token records (no API available from SCNet) and converts to Credits with the official multiplier formula. Ships a desktop pane + statusbar chip + dashboard tab backend."
+author: "osuCarl"
