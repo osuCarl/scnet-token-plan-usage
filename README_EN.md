@@ -43,7 +43,7 @@ Then:
 ## Features
 
 - **Statusbar chip**: always-on remaining Credits; turns amber under 25%, red under 10%
-- **Usage pane**: cycle/today Credits, progress bar, daily bar chart, per-model rows (multiplier, tokens, call count)
+- **Usage pane**: cycle/today Credits, progress bar, daily bar chart (current cycle, stacked input/cached/output, hover for bucket detail), per-model rows (multiplier, tokens, call count)
 - **Auto-refresh every 30s** (React Query polling; manual refresh command in ⌘K)
 - **Configurable**: plan quota, cycle start day, per-model multiplier overrides — stored in local `config.json`
 
