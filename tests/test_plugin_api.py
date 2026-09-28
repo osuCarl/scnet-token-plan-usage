@@ -62,17 +62,25 @@ if resp.status_code != 200:
 
 data = resp.json()
 cycle = data["cycle"]
-print(f"\ncycle: {cycle['start']} → {cycle['end']}")
+print(f"\ncycle: {cycle['start']} → {cycle['end']} (end INCLUSIVE — expiry day is the cycle's last day)")
 print(f"totals.credits = {data['totals']['credits']}, today = {data['today_credits']}")
 print(f"models: {[m['model'] for m in data['models']]}")
 print(f"daily rows: {len(data['daily'])}, cycle_days: {len(data.get('cycle_days', []))}")
 
-# 1. daily days inside cycle
+# 0. REGRESSION (2026-09-28 bug): the expiry/anchor day itself must still
+# belong to the CURRENT cycle — the plugin used to flip to a new cycle at
+# 00:00 of the expiry day. Today must satisfy start <= today <= end.
+today_str = datetime.now().strftime("%Y-%m-%d")
+check("today is inside the current cycle (expiry day = last day, not day 1 of a new cycle)",
+      cycle["start"] <= today_str <= cycle["end"],
+      f"today={today_str} cycle={cycle['start']}→{cycle['end']}")
+
+# 1. daily days inside cycle (end inclusive)
 daily = data["daily"]
 start_s, end_s = cycle["start"], cycle["end"]
-inside = all(start_s <= d["day"] < end_s for d in daily)
-check("all daily days inside current cycle", inside,
-      str([d["day"] for d in daily if not (start_s <= d["day"] < end_s)]))
+inside = all(start_s <= d["day"] <= end_s for d in daily)
+check("all daily days inside current cycle (inclusive end)", inside,
+      str([d["day"] for d in daily if not (start_s <= d["day"] <= end_s)]))
 
 # 2. sum of daily credits ≈ totals.credits (same rows, same filter)
 sum_credits = sum(d["credits"] for d in daily)
@@ -109,12 +117,43 @@ else:
 cd = data.get("cycle_days", [])
 if cd:
     check("cycle_days[0] == cycle.start", cd[0] == start_s, f"{cd[0]} vs {start_s}")
+    check("cycle_days[-1] == cycle.end (expiry day included)", cd[-1] == end_s,
+          f"last={cd[-1]} end={end_s}")
     from datetime import date, timedelta
     d0 = date.fromisoformat(cd[0])
     contiguous = all(
         date.fromisoformat(cd[i]) == d0 + timedelta(days=i) for i in range(len(cd))
     )
     check("cycle_days contiguous daily steps", contiguous)
+
+# 7. UNIT: _cycle_bounds flip semantics — the anchor/expiry day belongs to
+# the OLD cycle; the cycle flips the day after. C-extension datetime can't
+# be patched, so _cycle_bounds takes 'now' as an injectable parameter in
+# tests; production callers keep the default (datetime.now()).
+print("\n_cycle_bounds unit checks (injected 'now'):")
+
+for today, expect_start, expect_end in [
+    ("2026-09-28", "2026-08-28", "2026-09-28"),  # expiry day → old cycle, today is last day
+    ("2026-09-29", "2026-09-28", "2026-10-28"),  # day after → new cycle
+    ("2026-09-27", "2026-08-28", "2026-09-28"),  # day before expiry
+    ("2026-08-28", "2026-07-28", "2026-08-28"),  # anchor day of previous cycle
+    ("2026-09-30", "2026-09-28", "2026-10-28"),  # after short-month clamp zone
+    ("2026-02-28", "2026-01-28", "2026-02-28"),  # Feb short-month expiry day
+    ("2026-03-01", "2026-02-28", "2026-03-28"),  # day after Feb expiry (clamped cycle)
+]:
+    fake = datetime.strptime(today, "%Y-%m-%d")
+    s_ts, e_ts, s_lab, e_lab = mod._cycle_bounds(28, now=fake)
+    ok = (s_lab == expect_start and e_lab == expect_end)
+    check(f"_cycle_bounds(28) on {today} → {expect_start}..{expect_end}", ok,
+          f"got {s_lab}..{e_lab}")
+
+# end_ts must be the exclusive next-day bound: expiry-day usage (any time
+# of day) still counts into the OLD cycle.
+s_ts, e_ts, s_lab, e_lab = mod._cycle_bounds(28, now=datetime.strptime("2026-09-28 16:49", "%Y-%m-%d %H:%M"))
+expiry_end_of_day = datetime.strptime("2026-09-28 23:59:59", "%Y-%m-%d %H:%M:%S").timestamp()
+check("end_ts covers expiry day 23:59:59 (exclusive next-day 00:00 bound)",
+      s_ts <= expiry_end_of_day < e_ts,
+      f"end_ts={e_ts} vs 09-28 23:59:59={expiry_end_of_day}")
 
 # show a few sample rows
 print("\nsample daily rows:")

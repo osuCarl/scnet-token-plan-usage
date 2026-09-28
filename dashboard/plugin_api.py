@@ -42,7 +42,7 @@ import asyncio
 import json
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -194,32 +194,46 @@ def _scnet_rows(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     )
 
 
-def _cycle_bounds(cycle_start_day: int) -> tuple[float, float, str, str]:
-    """Current subscription cycle [start_ts, next_ts) + labels.
+def _cycle_bounds(cycle_start_day: int, now: Optional[datetime] = None) -> tuple[float, float, str, str]:
+    """Current subscription cycle [start_ts, end_ts] + labels.
 
     Token Plan cycles are natural months from the purchase day. With the
     default cycle_start_day=1 this is the calendar month; a user who
     bought on the 5th gets 05-month 00:00 to 05-next 00:00 (UTC+8).
     Short months clamp (a day-31 purchase rolls to the 28th/29th/30th).
+
+    The END date is the expiry day itself: on 2026-09-28 (day-28 cycle)
+    the current cycle is 08-28 → 09-28 INCLUSIVE — the plan stays usable
+    through the last day and the new cycle only starts the next day.
     """
     import calendar
 
-    now = datetime.now()
+    if now is None:
+        now = datetime.now()
     day = min(max(1, cycle_start_day), 31)
 
     def _clamp(year: int, month: int, d: int) -> datetime:
         d = min(d, calendar.monthrange(year, month)[1])
         return datetime(year, month, d)
 
-    if now.day >= day:
+    # Flip to the new cycle only the day AFTER the anniversary day: the
+    # expiry day itself still belongs to the old cycle (plan usable through
+    # end of day). day=28: on 09-28 the cycle is 08-28 → 09-28 (today =
+    # last day); on 09-29 it becomes 09-28 → 10-28.
+    if now.day > day:
         start = _clamp(now.year, now.month, day)
     else:
         y, m = (now.year, now.month - 1) if now.month > 1 else (now.year - 1, 12)
         start = _clamp(y, m, day)
 
     ny, nm = (start.year, start.month + 1) if start.month < 12 else (start.year + 1, 1)
-    nxt = _clamp(ny, nm, day)
-    return start.timestamp(), nxt.timestamp(), start.strftime("%Y-%m-%d"), nxt.strftime("%Y-%m-%d")
+    end = _clamp(ny, nm, day)  # expiry day 00:00 (label); the day itself belongs to this cycle
+    return (
+        start.timestamp(),
+        (end + timedelta(days=1)).timestamp(),  # exclusive upper bound: next day 00:00
+        start.strftime("%Y-%m-%d"),
+        end.strftime("%Y-%m-%d"),
+    )
 
 
 @router.get("/usage")
@@ -333,6 +347,8 @@ async def get_usage() -> Dict[str, Any]:
             today_credits = round(daily_agg.get(today, {}).get("credits", 0.0), 2)
 
             # ---- full-day coverage of the cycle (zero-fill gap days) ----
+            # end_ts is the exclusive next-day bound, so a cycle 08-28 →
+            # 09-28 (inclusive) yields 32 day entries: 08-28 … 09-28.
             ndays = int((end_ts - start_ts) // 86400)
             cycle_days = [
                 datetime.fromtimestamp(start_ts + i * 86400).strftime("%Y-%m-%d")
